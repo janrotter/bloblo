@@ -167,6 +167,15 @@ func main() {
 	log.Println("I will keep my blobs in the bucket named", s3BucketName)
 	log.Println("Please keep your fingers crossed ;)")
 
-	r := blobloProxy{proxy: httputil.NewSingleHostReverseProxy(upstreamUrl)}
+	//a custom Director is needed, as we have to set the host header
+	r := blobloProxy{proxy: &httputil.ReverseProxy{Director: func(req *http.Request) {
+		req.URL.Scheme = upstreamUrl.Scheme
+		req.URL.Host = upstreamUrl.Host
+		req.Host = upstreamUrl.Host
+		if _, ok := req.Header["User-Agent"]; !ok {
+			// explicitly disable User-Agent so it's not set to default value
+			req.Header.Set("User-Agent", "")
+		}
+	}}}
 	http.ListenAndServe(listenAddress, &r)
 }
