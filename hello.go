@@ -1,12 +1,12 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -15,6 +15,10 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+)
+
+const (
+	presignExpirationMinutes = 5
 )
 
 var (
@@ -29,35 +33,55 @@ var (
 )
 
 func init() {
-	listenAddress = ":7777"
-	s3BucketName = "sample-bucket"
-	upstreamUrl, _ = url.Parse("http://localhost:6666")
-
-	cachedBlobDigests = make(map[string]bool)
-	cachedBlobDigests["sha256:dfcff6d93b39097b3e4f343e505e1af69ccc98d4122439edc882f1ab908f48cb"] = true
-
-	localstackResolver := func(service, region string, opts ...func(*endpoints.Options)) (endpoints.ResolvedEndpoint, error) {
-		localstackUrl := "http://localhost:4566"
-
-		return endpoints.ResolvedEndpoint{
-			URL:           localstackUrl,
-			SigningRegion: "us-east-1",
-		}, nil
+	listenAddress = os.Getenv("BLOBLO_LISTEN_ADDR")
+	if listenAddress == "" {
+		listenAddress = ":7777"
 	}
 
-	s3ForcePathStyle := true
-	sess := session.Must(session.NewSessionWithOptions(session.Options{
-		Config: aws.Config{
-			Region:           aws.String("us-east-1"),
-			EndpointResolver: endpoints.ResolverFunc(localstackResolver),
-			S3ForcePathStyle: &s3ForcePathStyle,
-		},
-		SharedConfigState: session.SharedConfigEnable,
-	}))
+	s3BucketName = os.Getenv("BLOBLO_S3_BUCKET_NAME")
+	if s3BucketName == "" {
+		s3BucketName = "sample-bucket"
+	}
 
-	s3Svc = s3.New(sess)
+	upstreamRawUrl := os.Getenv("BLOBLO_UPSTREAM_URL")
+	if upstreamRawUrl == "" {
+		upstreamRawUrl = "http://localhost:6666"
+	}
 
-	s3Uploader = s3manager.NewUploader(sess)
+	var err error
+	upstreamUrl, err = url.Parse(upstreamRawUrl)
+	if err != nil {
+		log.Panic("Can't parse the upstream url", err)
+	}
+
+	useLocalStack := os.Getenv("BLOBLO_USE_LOCALSTACK")
+
+	var awsSession *session.Session
+	if useLocalStack == "true" {
+		localstackResolver := func(service, region string, opts ...func(*endpoints.Options)) (endpoints.ResolvedEndpoint, error) {
+			localstackUrl := "http://localhost:4566"
+
+			return endpoints.ResolvedEndpoint{
+				URL:           localstackUrl,
+				SigningRegion: "us-east-1",
+			}, nil
+		}
+
+		s3ForcePathStyle := true
+		awsSession = session.Must(session.NewSessionWithOptions(session.Options{
+			Config: aws.Config{
+				Region:           aws.String("us-east-1"),
+				EndpointResolver: endpoints.ResolverFunc(localstackResolver),
+				S3ForcePathStyle: &s3ForcePathStyle,
+			},
+			SharedConfigState: session.SharedConfigEnable,
+		}))
+	} else {
+		awsSession = session.Must(session.NewSession())
+	}
+
+	s3Svc = s3.New(awsSession)
+	s3Uploader = s3manager.NewUploader(awsSession)
 }
 
 func presignBlob(blobDigest string) string {
@@ -65,7 +89,7 @@ func presignBlob(blobDigest string) string {
 		Bucket: aws.String(s3BucketName),
 		Key:    aws.String(blobDigest),
 	})
-	urlStr, err := req.Presign(15 * time.Minute)
+	urlStr, err := req.Presign(presignExpirationMinutes * time.Minute)
 
 	if err != nil {
 		log.Println("Failed to sign request", err)
@@ -79,7 +103,7 @@ func blobInCache(blobDigest string) bool {
 	return err == nil
 }
 
-type RequestLogger struct {
+type blobloProxy struct {
 	proxy *httputil.ReverseProxy
 }
 
@@ -92,7 +116,7 @@ func getUpstreamRequest(req *http.Request) *http.Request {
 	return upstreamReq
 }
 
-func (rl *RequestLogger) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+func (rl *blobloProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	log.Println(req.RequestURI, req.Method)
 
 	pathElements := strings.Split(req.RequestURI, "/")
@@ -139,10 +163,10 @@ func (rl *RequestLogger) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func main() {
-	fmt.Println("Hello, World! I will use", upstreamUrl, "as my upstream and listen on", listenAddress)
+	log.Println("Hello, World! I will use", upstreamUrl, "as my upstream and listen on", listenAddress)
+	log.Println("I will keep my blobs in the bucket named", s3BucketName)
+	log.Println("Please keep your fingers crossed ;)")
 
-	proxy := httputil.NewSingleHostReverseProxy(upstreamUrl)
-	r := new(RequestLogger)
-	r.proxy = proxy
-	http.ListenAndServe(listenAddress, r)
+	r := blobloProxy{proxy: httputil.NewSingleHostReverseProxy(upstreamUrl)}
+	http.ListenAndServe(listenAddress, &r)
 }
