@@ -148,12 +148,16 @@ func (rl *blobloProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				teeReader := io.TeeReader(response.Body, w)
 
 				log.Println("Uploading blob ", blobDigest, "to cache")
-				s3Uploader.Upload(
+				_, err = s3Uploader.Upload(
 					&s3manager.UploadInput{
 						Bucket: &s3BucketName,
 						Key:    &blobDigest,
 						Body:   teeReader,
 					})
+				if err != nil {
+					log.Println("Error uploading blob", blobDigest, " : ", err)
+				}
+
 				return
 			}
 		}
@@ -166,6 +170,13 @@ func main() {
 	log.Println("Hello, World! I will use", upstreamUrl, "as my upstream and listen on", listenAddress)
 	log.Println("I will keep my blobs in the bucket named", s3BucketName)
 	log.Println("Please keep your fingers crossed ;)")
+	log.Println()
+
+	_, err := s3Svc.GetBucketLocation(&s3.GetBucketLocationInput{Bucket: &s3BucketName})
+	if err != nil {
+		log.Println("The AWS configuration seems to be invalid:")
+		log.Panic(err)
+	}
 
 	//a custom Director is needed, as we have to set the host header
 	r := blobloProxy{proxy: &httputil.ReverseProxy{Director: func(req *http.Request) {
