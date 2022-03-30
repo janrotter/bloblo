@@ -27,7 +27,8 @@ var (
 	s3Svc         *s3.S3
 	s3Uploader    *s3manager.Uploader
 
-	upstreamUrl *url.URL
+	upstreamUrl  *url.URL
+	preserveHost bool
 
 	cachedBlobDigests map[string]bool
 )
@@ -47,6 +48,8 @@ func init() {
 	if upstreamRawUrl == "" {
 		upstreamRawUrl = "http://localhost:6666"
 	}
+
+	preserveHost = os.Getenv("BLOBLO_PRESERVE_HOST") == "true"
 
 	var err error
 	upstreamUrl, err = url.Parse(upstreamRawUrl)
@@ -182,11 +185,16 @@ func main() {
 	r := blobloProxy{proxy: &httputil.ReverseProxy{Director: func(req *http.Request) {
 		req.URL.Scheme = upstreamUrl.Scheme
 		req.URL.Host = upstreamUrl.Host
-		req.Host = upstreamUrl.Host
+		if !preserveHost {
+			req.Host = upstreamUrl.Host
+		}
 		if _, ok := req.Header["User-Agent"]; !ok {
 			// explicitly disable User-Agent so it's not set to default value
 			req.Header.Set("User-Agent", "")
 		}
 	}}}
-	http.ListenAndServe(listenAddress, &r)
+	err = http.ListenAndServe(listenAddress, &r)
+	if err != nil {
+		log.Panic(err)
+	}
 }
