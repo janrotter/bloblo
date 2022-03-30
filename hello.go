@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"log"
 	"net/http"
@@ -10,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/endpoints"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 const (
@@ -22,10 +23,11 @@ const (
 )
 
 var (
-	listenAddress string
-	s3BucketName  string
-	s3Svc         *s3.S3
-	s3Uploader    *s3manager.Uploader
+	listenAddress   string
+	s3BucketName    string
+	s3Client        *s3.Client
+	s3PresignClient *s3.PresignClient
+	s3Uploader      *manager.Uploader
 
 	upstreamUrl  *url.URL
 	preserveHost bool
@@ -58,51 +60,53 @@ func init() {
 	}
 
 	useLocalStack := os.Getenv("BLOBLO_USE_LOCALSTACK")
-
-	var awsSession *session.Session
+	var awsConfig aws.Config
 	if useLocalStack == "true" {
-		localstackResolver := func(service, region string, opts ...func(*endpoints.Options)) (endpoints.ResolvedEndpoint, error) {
+		localStackResolver := aws.EndpointResolverFunc(func(service, region string) (aws.Endpoint, error) {
 			localstackUrl := "http://localhost:4566"
 
-			return endpoints.ResolvedEndpoint{
+			return aws.Endpoint{
+				PartitionID:   "aws",
 				URL:           localstackUrl,
 				SigningRegion: "us-east-1",
 			}, nil
-		}
-
-		s3ForcePathStyle := true
-		awsSession = session.Must(session.NewSessionWithOptions(session.Options{
-			Config: aws.Config{
-				Region:           aws.String("us-east-1"),
-				EndpointResolver: endpoints.ResolverFunc(localstackResolver),
-				S3ForcePathStyle: &s3ForcePathStyle,
-			},
-			SharedConfigState: session.SharedConfigEnable,
-		}))
+		})
+		awsConfig, err = config.LoadDefaultConfig(context.TODO(),
+			config.WithEndpointResolver(localStackResolver))
 	} else {
-		awsSession = session.Must(session.NewSession())
+		awsConfig, err = config.LoadDefaultConfig(context.TODO())
+	}
+	if err != nil {
+		log.Printf("error: %v", err)
+		return
 	}
 
-	s3Svc = s3.New(awsSession)
-	s3Uploader = s3manager.NewUploader(awsSession)
+	s3Client = s3.NewFromConfig(awsConfig, func(opts *s3.Options) {
+		opts.UsePathStyle = true
+	})
+
+	s3PresignClient = s3.NewPresignClient(s3Client)
+
+	s3Uploader = manager.NewUploader(s3Client)
 }
 
 func presignBlob(blobDigest string) string {
-	req, _ := s3Svc.GetObjectRequest(&s3.GetObjectInput{
-		Bucket: aws.String(s3BucketName),
-		Key:    aws.String(blobDigest),
-	})
-	urlStr, err := req.Presign(presignExpirationMinutes * time.Minute)
+	urlStr, err := s3PresignClient.PresignGetObject(
+		context.TODO(),
+		&s3.GetObjectInput{
+			Bucket: aws.String(s3BucketName),
+			Key:    aws.String(blobDigest),
+		}, s3.WithPresignExpires(presignExpirationMinutes*time.Minute))
 
 	if err != nil {
 		log.Println("Failed to sign request", err)
 	}
 
-	return urlStr
+	return urlStr.URL
 }
 
 func blobInCache(blobDigest string) bool {
-	_, err := s3Svc.HeadObject(&s3.HeadObjectInput{Bucket: &s3BucketName, Key: &blobDigest})
+	_, err := s3Client.HeadObject(context.TODO(), &s3.HeadObjectInput{Bucket: &s3BucketName, Key: &blobDigest})
 	return err == nil
 }
 
@@ -152,10 +156,12 @@ func (rl *blobloProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 				log.Println("Uploading blob ", blobDigest, "to cache")
 				_, err = s3Uploader.Upload(
-					&s3manager.UploadInput{
-						Bucket: &s3BucketName,
-						Key:    &blobDigest,
-						Body:   teeReader,
+					context.TODO(),
+					&s3.PutObjectInput{
+						Bucket:            &s3BucketName,
+						Key:               &blobDigest,
+						Body:              teeReader,
+						ChecksumAlgorithm: types.ChecksumAlgorithmSha256,
 					})
 				if err != nil {
 					log.Println("Error uploading blob", blobDigest, " : ", err)
@@ -175,7 +181,7 @@ func main() {
 	log.Println("Please keep your fingers crossed ;)")
 	log.Println()
 
-	_, err := s3Svc.GetBucketLocation(&s3.GetBucketLocationInput{Bucket: &s3BucketName})
+	_, err := s3Client.GetBucketLocation(context.TODO(), &s3.GetBucketLocationInput{Bucket: &s3BucketName})
 	if err != nil {
 		log.Println("The AWS configuration seems to be invalid:")
 		log.Panic(err)
