@@ -128,7 +128,7 @@ func getUpstreamRequest(req *http.Request) *http.Request {
 func (rl *blobloProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	log.Println(req.RequestURI, req.Method)
 
-	if req.Method == http.MethodGet && (strings.HasSuffix(req.RequestURI, ".jar") || strings.HasSuffix(req.RequestURI, ".tar.gz") || strings.HasSuffix(req.RequestURI, ".tgz")) {
+	if req.Method == http.MethodGet && (strings.HasSuffix(req.RequestURI, ".jar") || strings.HasSuffix(req.RequestURI, ".tar.gz") || strings.HasSuffix(req.RequestURI, ".tgz") || strings.HasSuffix(req.RequestURI, ".pom")) {
 		headReq := getUpstreamRequest(req)
 		headReq.Method = http.MethodHead
 		response, err := http.DefaultClient.Do(headReq)
