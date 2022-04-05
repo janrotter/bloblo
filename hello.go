@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto"
+	"encoding/hex"
 	"io"
 	"log"
 	"net/http"
@@ -48,7 +50,7 @@ func init() {
 
 	upstreamRawUrl := os.Getenv("BLOBLO_UPSTREAM_URL")
 	if upstreamRawUrl == "" {
-		upstreamRawUrl = "http://localhost:6666"
+		upstreamRawUrl = "http://localhost:8080/"
 	}
 
 	preserveHost = os.Getenv("BLOBLO_PRESERVE_HOST") == "true"
@@ -126,48 +128,55 @@ func getUpstreamRequest(req *http.Request) *http.Request {
 func (rl *blobloProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	log.Println(req.RequestURI, req.Method)
 
-	pathElements := strings.Split(req.RequestURI, "/")
-	if req.Method == http.MethodGet && len(pathElements) > 2 && pathElements[len(pathElements)-2] == "blobs" {
-		blobDigest := pathElements[len(pathElements)-1]
-
+	if req.Method == http.MethodGet && (strings.HasSuffix(req.RequestURI, ".jar") || strings.HasSuffix(req.RequestURI, ".tar.gz") || strings.HasSuffix(req.RequestURI, ".tgz")) {
 		headReq := getUpstreamRequest(req)
 		headReq.Method = http.MethodHead
 		response, err := http.DefaultClient.Do(headReq)
 		if err != nil {
-			log.Println("Failed to reach the upstream", err)
-			w.WriteHeader(http.StatusInternalServerError)
+			log.Println("Failed to reach the upstream for HEAD, falling back to proxying the request", err)
+			rl.proxy.ServeHTTP(w, req)
 			return
 		}
 		if response.StatusCode == http.StatusOK {
-			if blobInCache(blobDigest) {
-				user, _, _ := headReq.BasicAuth()
-				log.Println("Serving the blob", blobDigest, "from cache for user", user)
-				http.Redirect(w, req, presignBlob(blobDigest), http.StatusFound)
-				return
-			} else { // upload the blob to cache and return the layer to the client
-				upstreamReq := getUpstreamRequest(req)
-				response, err := http.DefaultClient.Do(upstreamReq)
-				if err != nil {
-					log.Println("Failed to reach the upstream", err)
-					w.WriteHeader(http.StatusInternalServerError)
+			if etag, ok := response.Header["Etag"]; ok && len(etag) > 0 && !strings.HasPrefix(etag[0], "W/") {
+				log.Println("Found etag: ", etag, "for", req.RequestURI)
+				digestInput := req.RequestURI + "\n" + etag[0]
+				sha256 := crypto.SHA256.New()
+				sha256.Write([]byte(digestInput))
+				blobDigest := hex.EncodeToString(sha256.Sum(nil))
+
+				if blobInCache(blobDigest) {
+					log.Println("Serving the blob", blobDigest, "from cache")
+					http.Redirect(w, req, presignBlob(blobDigest), http.StatusFound)
+					return
+				} else { // upload the blob to cache and return the layer to the client
+					upstreamReq := getUpstreamRequest(req)
+					response, err := http.DefaultClient.Do(upstreamReq)
+					if err != nil {
+						log.Println("Failed to reach the upstream", err)
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+					teeReader := io.TeeReader(response.Body, w)
+
+					contentType := response.Header.Get("content-type")
+
+					log.Println("Uploading blob ", blobDigest, "to cache")
+					_, err = s3Uploader.Upload(
+						context.TODO(),
+						&s3.PutObjectInput{
+							Bucket:            &s3BucketName,
+							Key:               &blobDigest,
+							Body:              teeReader,
+							ChecksumAlgorithm: types.ChecksumAlgorithmSha256,
+							ContentType:       &contentType,
+						})
+					if err != nil {
+						log.Println("Error uploading blob", blobDigest, " : ", err)
+					}
+
 					return
 				}
-				teeReader := io.TeeReader(response.Body, w)
-
-				log.Println("Uploading blob ", blobDigest, "to cache")
-				_, err = s3Uploader.Upload(
-					context.TODO(),
-					&s3.PutObjectInput{
-						Bucket:            &s3BucketName,
-						Key:               &blobDigest,
-						Body:              teeReader,
-						ChecksumAlgorithm: types.ChecksumAlgorithmSha256,
-					})
-				if err != nil {
-					log.Println("Error uploading blob", blobDigest, " : ", err)
-				}
-
-				return
 			}
 		}
 	}
