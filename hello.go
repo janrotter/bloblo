@@ -87,7 +87,7 @@ func init() {
 	var err error
 	upstreamUrl, err = url.Parse(upstreamRawUrl)
 	if err != nil {
-		logger.Panic("Can't parse the upstream url", zap.String("error", err.Error()))
+		logger.Fatal("Can't parse the upstream url", zap.String("error", err.Error()))
 	}
 
 	useLocalStack := os.Getenv("BLOBLO_USE_LOCALSTACK")
@@ -215,7 +215,7 @@ func main() {
 	_, err := s3Client.GetBucketLocation(context.TODO(), &s3.GetBucketLocationInput{Bucket: &s3BucketName})
 	if err != nil {
 		logger.Error("The AWS configuration seems to be invalid", zap.String("error", err.Error()))
-		logger.Panic(err.Error())
+		logger.Fatal(err.Error())
 	}
 
 	//a custom Director is needed, as we have to set the host header
@@ -232,6 +232,6 @@ func main() {
 	}}}
 	err = http.ListenAndServe(listenAddress, &r)
 	if err != nil {
-		logger.Panic(err.Error())
+		logger.Fatal(err.Error())
 	}
 }
