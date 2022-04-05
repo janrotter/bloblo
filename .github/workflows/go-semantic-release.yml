@@ -1,0 +1,16 @@
+name: Go semantic release
+on:
+  push:
+    branches: [ main ]
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@master
+      - uses: go-semantic-release/action@v1
+        with:
+           github-token: ${{ secrets.BOT_GITHUB_TOKEN }}
+           prerelease: true
+           allow-initial-development-versions: true
