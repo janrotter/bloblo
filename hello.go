@@ -229,7 +229,9 @@ func main() {
 			// explicitly disable User-Agent so it's not set to default value
 			req.Header.Set("User-Agent", "")
 		}
-	}}}
+	},
+		ErrorLog: zap.NewStdLog(logger),
+	}}
 	err = http.ListenAndServe(listenAddress, &r)
 	if err != nil {
 		logger.Fatal(err.Error())
