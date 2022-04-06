@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -16,6 +15,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 const (
@@ -23,6 +24,7 @@ const (
 )
 
 var (
+	logger          *zap.Logger
 	listenAddress   string
 	s3BucketName    string
 	s3Client        *s3.Client
@@ -34,6 +36,35 @@ var (
 
 	cachedBlobDigests map[string]bool
 )
+
+func initLogger() {
+
+	infoLevel := zap.LevelEnablerFunc(func(level zapcore.Level) bool {
+		return level == zapcore.InfoLevel
+	})
+
+	errorLevel := zap.LevelEnablerFunc(func(level zapcore.Level) bool {
+		return level == zapcore.ErrorLevel || level == zapcore.FatalLevel || level == zapcore.PanicLevel
+	})
+
+	stdout := zapcore.Lock(os.Stdout)
+	stderr := zapcore.Lock(os.Stderr)
+
+	core := zapcore.NewTee(
+		zapcore.NewCore(
+			zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()),
+			stdout,
+			infoLevel,
+		),
+		zapcore.NewCore(
+			zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()),
+			stderr,
+			errorLevel,
+		),
+	)
+
+	logger = zap.New(core)
+}
 
 func init() {
 	listenAddress = os.Getenv("BLOBLO_LISTEN_ADDR")
@@ -56,7 +87,7 @@ func init() {
 	var err error
 	upstreamUrl, err = url.Parse(upstreamRawUrl)
 	if err != nil {
-		log.Panic("Can't parse the upstream url", err)
+		logger.Fatal("Can't parse the upstream url", zap.String("error", err.Error()))
 	}
 
 	useLocalStack := os.Getenv("BLOBLO_USE_LOCALSTACK")
@@ -77,7 +108,7 @@ func init() {
 		awsConfig, err = config.LoadDefaultConfig(context.TODO())
 	}
 	if err != nil {
-		log.Printf("error: %v", err)
+		logger.Error("Error loading AWS connection configuration", zap.String("error", err.Error()))
 		return
 	}
 
@@ -99,7 +130,7 @@ func presignBlob(blobDigest string) string {
 		}, s3.WithPresignExpires(presignExpirationMinutes*time.Minute))
 
 	if err != nil {
-		log.Println("Failed to sign request", err)
+		logger.Error("Failed to sign request", zap.String("error", err.Error()))
 	}
 
 	return urlStr.URL
@@ -124,7 +155,7 @@ func getUpstreamRequest(req *http.Request) *http.Request {
 }
 
 func (rl *blobloProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	log.Println(req.RequestURI, req.Method)
+	logger.Info("Incoming request", zap.String("request", req.RequestURI), zap.String("method", req.Method))
 
 	pathElements := strings.Split(req.RequestURI, "/")
 	if req.Method == http.MethodGet && len(pathElements) > 2 && pathElements[len(pathElements)-2] == "blobs" {
@@ -134,27 +165,27 @@ func (rl *blobloProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		headReq.Method = http.MethodHead
 		response, err := http.DefaultClient.Do(headReq)
 		if err != nil {
-			log.Println("Failed to reach the upstream", err)
+			logger.Error("Failed to reach the upstream", zap.String("error", err.Error()))
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		if response.StatusCode == http.StatusOK {
 			if blobInCache(blobDigest) {
 				user, _, _ := headReq.BasicAuth()
-				log.Println("Serving the blob", blobDigest, "from cache for user", user)
+				logger.Info("Serving blob from cache", zap.String("digest", blobDigest), zap.String("user", user), zap.String("action", "serve_blob"))
 				http.Redirect(w, req, presignBlob(blobDigest), http.StatusFound)
 				return
 			} else { // upload the blob to cache and return the layer to the client
 				upstreamReq := getUpstreamRequest(req)
 				response, err := http.DefaultClient.Do(upstreamReq)
 				if err != nil {
-					log.Println("Failed to reach the upstream", err)
+					logger.Error("Failed to reach the upstream", zap.String("error", err.Error()))
 					w.WriteHeader(http.StatusInternalServerError)
 					return
 				}
 				teeReader := io.TeeReader(response.Body, w)
 
-				log.Println("Uploading blob ", blobDigest, "to cache")
+				logger.Info("Uploading blob to cache", zap.String("digest", blobDigest), zap.String("action", "upload_blob"))
 				_, err = s3Uploader.Upload(
 					context.TODO(),
 					&s3.PutObjectInput{
@@ -164,7 +195,7 @@ func (rl *blobloProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 						ChecksumAlgorithm: types.ChecksumAlgorithmSha256,
 					})
 				if err != nil {
-					log.Println("Error uploading blob", blobDigest, " : ", err)
+					logger.Error("Error uploading blob", zap.String("digest", blobDigest), zap.String("error", err.Error()))
 				}
 
 				return
@@ -176,15 +207,16 @@ func (rl *blobloProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 func main() {
-	log.Println("Hello, World! I will use", upstreamUrl, "as my upstream and listen on", listenAddress)
-	log.Println("I will keep my blobs in the bucket named", s3BucketName)
-	log.Println("Please keep your fingers crossed ;)")
-	log.Println()
+	initLogger()
+	defer logger.Sync()
+	logger.Sugar().Infof("Hello, World! I will use %s as my upstream and listen on %s", upstreamUrl, listenAddress)
+	logger.Sugar().Infof("I will keep my blobs in the bucket named %s", s3BucketName)
+	logger.Info("Please keep your fingers crossed ;)")
 
 	_, err := s3Client.GetBucketLocation(context.TODO(), &s3.GetBucketLocationInput{Bucket: &s3BucketName})
 	if err != nil {
-		log.Println("The AWS configuration seems to be invalid:")
-		log.Panic(err)
+		logger.Error("The AWS configuration seems to be invalid", zap.String("error", err.Error()))
+		logger.Fatal(err.Error())
 	}
 
 	//a custom Director is needed, as we have to set the host header
@@ -198,9 +230,11 @@ func main() {
 			// explicitly disable User-Agent so it's not set to default value
 			req.Header.Set("User-Agent", "")
 		}
-	}}}
+	},
+		ErrorLog: zap.NewStdLog(logger),
+	}}
 	err = http.ListenAndServe(listenAddress, &r)
 	if err != nil {
-		log.Panic(err)
+		logger.Fatal(err.Error())
 	}
 }
