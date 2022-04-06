@@ -208,6 +208,7 @@ func (rl *blobloProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 func main() {
 	initLogger()
+	defer logger.Sync()
 	logger.Sugar().Infof("Hello, World! I will use %s as my upstream and listen on %s", upstreamUrl, listenAddress)
 	logger.Sugar().Infof("I will keep my blobs in the bucket named %s", s3BucketName)
 	logger.Info("Please keep your fingers crossed ;)")
