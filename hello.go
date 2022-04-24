@@ -169,6 +169,7 @@ func (rl *blobloProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		defer response.Body.Close()
 		if response.StatusCode == http.StatusOK {
 			if blobInCache(blobDigest) {
 				user, _, _ := headReq.BasicAuth()
@@ -183,6 +184,7 @@ func (rl *blobloProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 					w.WriteHeader(http.StatusInternalServerError)
 					return
 				}
+				defer response.Body.Close()
 				teeReader := io.TeeReader(response.Body, w)
 
 				logger.Info("Uploading blob to cache", zap.String("digest", blobDigest), zap.String("action", "upload_blob"))
