@@ -1,4 +1,4 @@
-module example/hello
+module github.com/janrotter/bloblo
 
 go 1.16
 
