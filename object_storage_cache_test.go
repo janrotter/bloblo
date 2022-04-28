@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -39,9 +40,29 @@ func (s3Client *s3ClientImpl) AbortMultipartUpload(context.Context, *s3.AbortMul
 
 func TestIsInCacheReturnsNilErrorForNotFoundItemsToAvoidFloodingLogs(t *testing.T) {
 	s3Client := &s3ClientImpl{err: &smithy.GenericAPIError{Code: "NotFound"}}
-	s3Cache := NewS3ObjectStorageCache(s3Client, nil, "bucketname", 5)
+	s3PresignClient := (S3PresignGetObjectAPIClient)(nil)
+	s3Cache := NewS3ObjectStorageCache(s3Client, s3PresignClient, "bucketname", 5)
 	isInCache, err := s3Cache.isBlobInCache("someobject")
 
 	assert.Nil(t, err)
 	assert.Equal(t, false, isInCache)
+}
+
+func TestIsInCacheReturnsTrueIfNoErrorsOccur(t *testing.T) {
+	s3Client := &s3ClientImpl{}
+	s3PresignClient := (S3PresignGetObjectAPIClient)(nil)
+	s3Cache := NewS3ObjectStorageCache(s3Client, s3PresignClient, "bucketname", 5)
+	isInCache, err := s3Cache.isBlobInCache("someobject")
+
+	assert.Nil(t, err)
+	assert.Equal(t, true, isInCache)
+}
+
+func TestIsInCacheReportsErrors(t *testing.T) {
+	s3Client := &s3ClientImpl{err: errors.New("Some error occured!")}
+	s3PresignClient := (S3PresignGetObjectAPIClient)(nil)
+	s3Cache := NewS3ObjectStorageCache(s3Client, s3PresignClient, "bucketname", 5)
+	_, err := s3Cache.isBlobInCache("someobject")
+
+	assert.NotNil(t, err)
 }
