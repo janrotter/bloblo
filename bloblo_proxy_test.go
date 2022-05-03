@@ -20,11 +20,13 @@ type testObjectStorageCache struct {
 	checkedForBlob           bool
 	uploadedBlob             bool
 	redirectedToPresignedUrl bool
+
+	defaultPresignedUrl string
 }
 
 func (cache *testObjectStorageCache) getPresignedUrl(blobDigest string) (string, error) {
 	cache.redirectedToPresignedUrl = true
-	return "http://localtest.me/a_presigned_url", nil
+	return cache.defaultPresignedUrl, nil
 }
 
 func (cache *testObjectStorageCache) isBlobInCache(blobDigest string) (bool, error) {
@@ -73,7 +75,9 @@ func newTestFixture(t *testing.T) *testFixture {
 	observedZapCore, _ := observer.New(zap.InfoLevel)
 	logger := zap.New(observedZapCore)
 
-	cache := &testObjectStorageCache{}
+	cache := &testObjectStorageCache{
+		defaultPresignedUrl: "http://localtest.me/a_presigned_url",
+	}
 
 	backendTestServer, err := newTestBackend("test response")
 	assert.Nil(t, err)
@@ -138,4 +142,31 @@ func TestBlobIsUploadedToCacheAndReturnedToClient(t *testing.T) {
 	assert.True(t, fixture.cache.checkedForBlob)
 	assert.True(t, fixture.cache.uploadedBlob)
 	assert.False(t, fixture.cache.redirectedToPresignedUrl)
+}
+
+func TestClientIsRedirectedWhenBlobInCache(t *testing.T) {
+	fixture := newTestFixture(t)
+	defer fixture.tBlobloServer.Close()
+	defer fixture.tBackend.server.Close()
+
+	client := http.Client{
+		Timeout: 1 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	cacheablePath := "/v2/blobs/sha256:891b05d87f5e008949d4caf55929c31c3aab0ecbd5ae19e40e8f1421ffd612dd"
+	resp, err := client.Get(fmt.Sprint(fixture.tBlobloServer.URL, cacheablePath))
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+	resp, err = client.Get(fmt.Sprint(fixture.tBlobloServer.URL, cacheablePath))
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+
+	location, err := resp.Location()
+	assert.Nil(t, err)
+
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.Equal(t, fixture.cache.defaultPresignedUrl, location.String())
+	assert.True(t, fixture.cache.redirectedToPresignedUrl)
 }
