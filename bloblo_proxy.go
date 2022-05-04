@@ -14,6 +14,7 @@ type BlobloProxy struct {
 	cache                ObjectStorageCache
 	fallbackReverseProxy http.Handler
 	logger               *zap.Logger
+	isCacheableUri       func(requestURI string) bool
 }
 
 func NewBlobloProxy(upstreamUrl *url.URL, cache ObjectStorageCache, fallbackReverseProxy http.Handler, logger *zap.Logger) *BlobloProxy {
@@ -22,6 +23,11 @@ func NewBlobloProxy(upstreamUrl *url.URL, cache ObjectStorageCache, fallbackReve
 		cache:                cache,
 		fallbackReverseProxy: fallbackReverseProxy,
 		logger:               logger,
+
+		isCacheableUri: func(requestURI string) bool {
+			pathElements := strings.Split(requestURI, "/")
+			return len(pathElements) > 2 && pathElements[len(pathElements)-2] == "blobs"
+		},
 	}
 }
 
@@ -37,8 +43,8 @@ func (blo *BlobloProxy) getUpstreamRequest(req *http.Request) *http.Request {
 func (blo *BlobloProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	blo.logger.Info("Incoming request", zap.String("request", req.RequestURI), zap.String("method", req.Method))
 
-	pathElements := strings.Split(req.RequestURI, "/")
-	if req.Method == http.MethodGet && len(pathElements) > 2 && pathElements[len(pathElements)-2] == "blobs" {
+	if req.Method == http.MethodGet && blo.isCacheableUri(req.RequestURI) {
+		pathElements := strings.Split(req.RequestURI, "/")
 		blobDigest := pathElements[len(pathElements)-1]
 
 		headReq := blo.getUpstreamRequest(req)

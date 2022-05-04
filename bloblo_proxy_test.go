@@ -170,3 +170,30 @@ func TestClientIsRedirectedWhenBlobInCache(t *testing.T) {
 	assert.Equal(t, fixture.cache.defaultPresignedUrl, location.String())
 	assert.True(t, fixture.cache.redirectedToPresignedUrl)
 }
+
+func TestCustomCacheableFilter(t *testing.T) {
+	fixture := newTestFixture(t)
+	defer fixture.tBlobloServer.Close()
+	defer fixture.tBackend.server.Close()
+
+	client := http.Client{
+		Timeout: 1 * time.Second,
+	}
+	requestPath := "/v2/blobs/sha256:891b05d87f5e008949d4caf55929c31c3aab0ecbd5ae19e40e8f1421ffd612dd"
+
+	fixture.tBloblo.isCacheableUri = func(requestURI string) bool {
+		return false
+	}
+	resp, err := client.Get(fmt.Sprint(fixture.tBlobloServer.URL, requestPath))
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+	assert.False(t, fixture.cache.checkedForBlob)
+
+	fixture.tBloblo.isCacheableUri = func(requestURI string) bool {
+		return true
+	}
+	resp, err = client.Get(fmt.Sprint(fixture.tBlobloServer.URL, requestPath))
+	assert.Nil(t, err)
+	defer resp.Body.Close()
+	assert.True(t, fixture.cache.checkedForBlob)
+}
